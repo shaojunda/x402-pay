@@ -76,6 +76,20 @@ node $S pay --url https://x402.org/protected \
 
 详细用法见 [SKILL.md](skills/x402-pay/SKILL.md)。
 
+## 更新
+
+用 `npx skills add` 安装的：
+
+```bash
+npx skills update x402-pay -g -y     # 用户级安装；项目级安装去掉 -g，在项目目录下运行
+```
+
+`skills` CLI 会对比 GitHub 上 Skill 目录的版本，有变化才更新；不写 `x402-pay` 则检查所有已安装的 Skill。
+
+手动复制安装的：重新复制 `skills/x402-pay/` 目录覆盖旧版本。
+
+更新后，脚本的改动在下一次调用时立即生效；`SKILL.md` 的改动（如新的使用说明）建议新开一个 Agent 会话，因为部分 Agent 只在会话开始时加载 Skill 说明。配置文件和环境变量不受更新影响。
+
 ## 开发
 
 ```bash
