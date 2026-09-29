@@ -1,0 +1,17 @@
+{
+  "name": "x402-pay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/pay.mjs --bundle --platform=node --format=esm --target=node18 --minify --legal-comments=eof --outfile=skills/x402-pay/scripts/pay.mjs"
+  },
+  "dependencies": {
+    "@x402/core": "2.27.0",
+    "@x402/evm": "2.27.0",
+    "@x402/fetch": "2.27.0",
+    "viem": "2.57.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}
