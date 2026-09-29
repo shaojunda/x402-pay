@@ -31,19 +31,42 @@ npx skills add shaojunda/x402-pay -g -y -a <agent>
 
 ## 配置
 
+两种方式任选，环境变量优先。
+
+**配置文件（推荐）**：`~/.config/x402-pay/config.json`
+
+```bash
+mkdir -p ~/.config/x402-pay
+cat > ~/.config/x402-pay/config.json <<'EOF'
+{
+  "private_key": "0x...",
+  "max_per_payment": "1"
+}
+EOF
+chmod 600 ~/.config/x402-pay/config.json
+```
+
+每次调用都会重新读取，所以**已经在运行的 Agent 也能立即用上**。文件权限过宽时，脚本会提示改成 `600`。
+
+**环境变量**：
+
 ```bash
 export X402_PRIVATE_KEY=0x...       # EVM 私钥
 export X402_MAX_PER_PAYMENT=1       # 单笔上限（美元），默认 1
 ```
 
-**请使用专用的小额钱包**，只存放少量 USDC。Agent 能执行脚本，理论上也能读到环境变量，所以限额只能防止 Agent 误操作，无法防御恶意行为；真正的安全边界是钱包里的余额。
+注意：环境变量只对设置之后、从同一个终端启动的进程生效。在其他终端或者已经运行的 Agent 里读不到，这种情况请改用配置文件。
+
+运行 `node skills/x402-pay/scripts/pay.mjs config` 可以查看当前生效的配置和它们的来源（不会显示私钥）。
+
+**请使用专用的小额钱包**，只存放少量 USDC。Agent 能执行脚本，理论上也能读到环境变量和配置文件，所以限额只能防止 Agent 误操作，无法防御恶意行为；真正的安全边界是钱包里的余额。
 
 ## 使用示例
 
 ```bash
 S=skills/x402-pay/scripts/pay.mjs
 
-node $S address                                          # 查看钱包地址
+node $S config                                           # 查看生效的配置和钱包地址
 node $S quote --url https://x402.org/protected           # 查看报价
 node $S pay --url https://x402.org/protected \
   --network base-sepolia --max-amount 0.01               # 付款调用（测试网）

@@ -2,6 +2,7 @@
 // x402 付费调用脚本：向受 x402 保护的 HTTP endpoint 发请求，按需签名付款，返回结果。
 //
 // 用法：
+//   node pay.mjs config                                查看配置来源、钱包地址和单笔上限（不显示私钥）
 //   node pay.mjs address                               查看钱包地址（用于充值）
 //   node pay.mjs quote --url <url> [请求参数]            不付款，只查看报价
 //   node pay.mjs pay --url <url> --max-amount <金额> [请求参数]
@@ -13,9 +14,11 @@
 //   --file <field>=<path>        把本地文件转成 data URI，写入请求体的 field 字段（可重复）
 //   --network <name>             只允许在这个网络付款：base、base-sepolia 或 CAIP-2（如 eip155:8453），默认 base
 //
-// 环境变量：
-//   X402_PRIVATE_KEY             EVM 私钥（0x 开头），只用于 pay 和 address
-//   X402_MAX_PER_PAYMENT         单笔付款硬上限（美元），默认 1；--max-amount 不能超过它
+// 配置（环境变量优先，其次是配置文件 ~/.config/x402-pay/config.json）：
+//   X402_PRIVATE_KEY      / private_key       EVM 私钥（0x 开头），只用于 pay、address 和 config
+//   X402_MAX_PER_PAYMENT  / max_per_payment   单笔付款硬上限（美元），默认 1；--max-amount 不能超过它
+//
+// 配置文件适合已经在运行的 Agent：环境变量只对设置之后启动的进程生效，配置文件每次调用都会重新读取。
 
 import fs from "node:fs";
 import os from "node:os";
@@ -66,18 +69,53 @@ function describeRequirement(req) {
   return { scheme: req.scheme, network: req.network, ...formatAmount(req), pay_to: req.payTo };
 }
 
+const CONFIG_FILE = path.join(
+  process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+  "x402-pay",
+  "config.json",
+);
+
+let configCache;
+
+// 读取配置文件；不存在时返回空对象。权限过宽时提醒，但不阻止使用
+function loadConfigFile() {
+  if (configCache) return configCache;
+  if (!fs.existsSync(CONFIG_FILE)) return (configCache = {});
+  if (process.platform !== "win32" && fs.statSync(CONFIG_FILE).mode & 0o077) {
+    process.stderr.write(`提示：${CONFIG_FILE} 对其他用户可读，建议运行 chmod 600 ${CONFIG_FILE}\n`);
+  }
+  try {
+    configCache = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+  } catch {
+    fail(`${CONFIG_FILE} 不是合法的 JSON`);
+  }
+  return configCache;
+}
+
+// 按“环境变量 → 配置文件”的顺序取值，并记录来源
+function setting(envName, fileKey) {
+  if (process.env[envName]) return { value: process.env[envName], source: `环境变量 ${envName}` };
+  const value = loadConfigFile()[fileKey];
+  if (value !== undefined && value !== "") return { value: String(value), source: `配置文件 ${CONFIG_FILE}` };
+  return { value: undefined, source: null };
+}
+
 function loadAccount() {
-  const key = process.env.X402_PRIVATE_KEY;
-  if (!key) fail("未设置环境变量 X402_PRIVATE_KEY");
-  if (!/^0x[0-9a-fA-F]{64}$/.test(key)) fail("X402_PRIVATE_KEY 格式不正确，应为 0x 开头的 64 位十六进制");
-  return privateKeyToAccount(key);
+  const { value: key, source } = setting("X402_PRIVATE_KEY", "private_key");
+  if (!key) {
+    fail(
+      `没有找到私钥。请设置环境变量 X402_PRIVATE_KEY，或创建配置文件 ${CONFIG_FILE}，内容为 {"private_key": "0x..."}，并运行 chmod 600 ${CONFIG_FILE}`,
+    );
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(key)) fail(`私钥格式不正确（来自${source}），应为 0x 开头的 64 位十六进制`);
+  return { account: privateKeyToAccount(key), source };
 }
 
 function hardCap() {
-  const raw = process.env.X402_MAX_PER_PAYMENT ?? "1";
+  const { value: raw = "1", source } = setting("X402_MAX_PER_PAYMENT", "max_per_payment");
   const cap = Number(raw);
-  if (!(cap > 0)) fail(`X402_MAX_PER_PAYMENT 必须是正数，当前为 ${raw}`);
-  return cap;
+  if (!(cap > 0)) fail(`单笔上限必须是正数，当前为 ${raw}（来自${source}）`);
+  return { cap, source: source || "默认值" };
 }
 
 function buildRequest(values) {
@@ -134,8 +172,21 @@ function readPaymentRequired(res, bodyText) {
   return null;
 }
 
+async function cmdConfig() {
+  const { account, source } = loadAccount();
+  const { cap, source: capSource } = hardCap();
+  print({
+    config_file: CONFIG_FILE,
+    config_file_exists: fs.existsSync(CONFIG_FILE),
+    address: account.address,
+    private_key_source: source,
+    max_per_payment: cap,
+    max_per_payment_source: capSource,
+  });
+}
+
 async function cmdAddress() {
-  print({ address: loadAccount().address });
+  print({ address: loadAccount().account.address });
 }
 
 async function cmdQuote(values) {
@@ -159,13 +210,13 @@ async function cmdPay(values) {
   if (!values["max-amount"]) fail("缺少 --max-amount（本次愿意支付的最高金额，单位美元）");
   const maxAmount = Number(values["max-amount"]);
   if (!(maxAmount > 0)) fail("--max-amount 必须是正数");
-  const cap = hardCap();
-  if (maxAmount > cap) fail(`--max-amount ${maxAmount} 超过了单笔上限 X402_MAX_PER_PAYMENT=${cap}`);
+  const { cap, source: capSource } = hardCap();
+  if (maxAmount > cap) fail(`--max-amount ${maxAmount} 超过了单笔上限 ${cap}（来自${capSource}）`);
 
   const network = resolveNetwork(values.network);
   const client = x402Client.fromConfig({
     // 只在指定网络上注册签名方案，其他网络的报价会被忽略
-    schemes: [{ network, client: new ExactEvmScheme(loadAccount()) }],
+    schemes: [{ network, client: new ExactEvmScheme(loadAccount().account) }],
     spendControls: { maxAmountPerPayment: `$${maxAmount}` },
   });
 
@@ -225,6 +276,8 @@ async function main() {
   });
 
   switch (command) {
+    case "config":
+      return cmdConfig();
     case "address":
       return cmdAddress();
     case "quote":
@@ -232,7 +285,7 @@ async function main() {
     case "pay":
       return cmdPay(values);
     default:
-      fail("用法：pay.mjs address | quote --url <url> [...] | pay --url <url> --max-amount <金额> [...]");
+      fail("用法：pay.mjs config | address | quote --url <url> [...] | pay --url <url> --max-amount <金额> [...]");
   }
 }
 
