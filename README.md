@@ -76,6 +76,8 @@ node $S pay --url https://x402.org/protected \
 
 详细用法见 [SKILL.md](skills/x402-pay/SKILL.md)。
 
+想了解付款的底层原理（怎么签名、调用哪个合约方法、卖方如何校验、gas 由谁支付、facilitator 能否作恶、卖方何时返回内容），见 [付款流程详解](docs/payment-flow.md)。
+
 ## 更新
 
 用 `npx skills add` 安装的：
