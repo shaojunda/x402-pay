@@ -12,7 +12,10 @@
   - 每次调用必须用 `--max-amount` 声明愿意支付的最高金额，服务要价更高时拒绝签名
   - 环境变量 `X402_MAX_PER_PAYMENT` 设定单笔硬上限，`--max-amount` 不能超过它
   - `--network` 限定付款网络，只在这一个网络上签名
-- **本地文件**：`--file image=./a.jpg` 自动转成 data URI 写入请求体
+- **免费请求**：`request` 调用上传、查询、下载等免费接口，永远不会付款
+- **本地文件**：`--file image=./a.jpg` 转成 data URI 写入 JSON 请求体；`--form file=@./a.jpg` 以 multipart 上传文件内容
+- **自定义请求头**：`--header 'Idempotency-Key: …'`、`--header 'Authorization: Bearer …'`
+- **保存结果**：`--output ./result.jpg` 把图片等二进制响应保存到指定文件
 - **零依赖**：Skill 里的脚本已打包成单个文件，安装后不需要 `npm install`
 
 基于官方客户端库 `@x402/fetch`（x402 协议 v2）实现。

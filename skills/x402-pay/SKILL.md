@@ -33,6 +33,14 @@ node scripts/pay.mjs quote --url <url> [请求参数]
 - 返回 `payment_required: true` 时，`options` 列出服务接受的付款方式：网络、金额、币种、收款地址。
 - 返回 `payment_required: false` 时，说明服务免费，响应内容就在 `body` 里，不需要再付款。注意这意味着请求已经被执行了一次。
 
+调用**已知免费**的接口（如多步流程中的上传、查询、下载）时，用 `request` 代替 `quote`，用法相同，同样永远不会付款：
+
+```bash
+node scripts/pay.mjs request --url <url> [请求参数]
+```
+
+如果免费接口意外返回 402，`request` 只报告报价，不会付款；这时停下来告诉用户。
+
 ### 2. 告知用户并确认
 
 付款前告诉用户：调用哪个服务、金额和币种、在哪个网络付款。得到确认后再继续。如果用户已经明确授权过这类付款，可以跳过这一步。
@@ -51,9 +59,14 @@ node scripts/pay.mjs pay --url <url> --max-amount <金额> --network <网络> [�
 | 参数 | 说明 |
 |---|---|
 | `--method <GET\|POST>` | 默认：有请求体时用 POST，否则用 GET |
+| `--header 'Name: value'` | 额外的请求头，可以重复使用，如 `Idempotency-Key`、`Authorization: Bearer <令牌>` |
 | `--body '<json>'` | JSON 请求体 |
 | `--body-file <path>` | 从文件读取 JSON 请求体 |
-| `--file <field>=<path>` | 把本地文件转成 data URI（`data:image/jpeg;base64,...`），写入请求体的 `field` 字段，可以重复使用 |
+| `--file <field>=<path>` | 把本地文件转成 data URI（`data:image/jpeg;base64,...`），写入 JSON 请求体的 `field` 字段，可以重复使用 |
+| `--form <field>=<value>` | 以 `multipart/form-data` 发送表单字段，可以重复使用；`<field>=@<path>` 表示上传文件内容。不能与 `--body`、`--body-file`、`--file` 同时使用 |
+| `--output <path>` | 请求成功时把响应体原样保存到这个文件，适合下载图片等二进制结果 |
+
+接口要求 JSON 还是 multipart，以服务说明为准（如 app-market manifest 中的 `endpoint.content_type`）：要求 multipart 上传文件时用 `--form file=@<path>`，不要转成 base64。
 
 示例：用本地照片调用修图服务
 
@@ -62,6 +75,18 @@ node scripts/pay.mjs pay --url https://api.example.com/v1/retouch \
   --max-amount 0.05 --network base \
   --body '{"style":"natural"}' --file image=./portrait.jpg
 ```
+
+示例：多步流程（免费上传 → 付费创建任务 → 免费下载结果）
+
+```bash
+node scripts/pay.mjs request --url https://api.example.com/upload --form file=@./photo.jpg
+node scripts/pay.mjs pay --url https://api.example.com/tasks --max-amount 0.001 --network eip155:84532 \
+  --header 'Idempotency-Key: <随机字符串>' --body '{"uploadId":"..."}'
+node scripts/pay.mjs request --url https://api.example.com/result --body '{"taskId":"..."}' \
+  --header 'Authorization: Bearer <令牌>' --output ./restored.jpg
+```
+
+重试付费请求时，复用同一个 `Idempotency-Key`（如果服务要求），避免重复扣费。
 
 ### 4. 读取结果
 
@@ -74,9 +99,9 @@ node scripts/pay.mjs pay --url https://api.example.com/v1/retouch \
 | `payment` | 实际选中的付款方式（网络、金额、收款地址） |
 | `rejected_reason` | 付款被拒绝的原因，例如 `invalid_exact_evm_insufficient_balance` 表示余额不足 |
 | `settlement` | 结算信息，其中 `transaction` 是交易哈希 |
-| `body` | 服务返回的内容。二进制内容会保存到临时文件，这里给出 `saved_to` 路径 |
+| `body` | 服务返回的内容。指定了 `--output` 时保存到该文件；未指定时二进制内容保存到临时文件。两种情况都给出 `saved_to` 路径 |
 
-告诉用户结果和实际花费。余额不足时，运行 `node scripts/pay.mjs address` 得到钱包地址，请用户充值。
+告诉用户结果和实际花费。注意 HTTP 200 不一定代表业务成功：响应体表示失败（如 `"success": false`）时，按失败处理。余额不足时，运行 `node scripts/pay.mjs address` 得到钱包地址，请用户充值。
 
 ## 规则
 

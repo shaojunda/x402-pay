@@ -5,13 +5,18 @@
 //   node pay.mjs config                                查看配置来源、钱包地址和单笔上限（不显示私钥）
 //   node pay.mjs address                               查看钱包地址（用于充值）
 //   node pay.mjs quote --url <url> [请求参数]            不付款，只查看报价
+//   node pay.mjs request --url <url> [请求参数]          调用免费接口（上传、查询、下载等），永远不付款
 //   node pay.mjs pay --url <url> --max-amount <金额> [请求参数]
 //
 // 请求参数：
 //   --method <GET|POST>          默认 POST（有请求体时）或 GET
+//   --header 'Name: value'       额外的请求头（可重复），如 Idempotency-Key、Authorization
 //   --body <json>                JSON 请求体
 //   --body-file <path>           从文件读取 JSON 请求体
-//   --file <field>=<path>        把本地文件转成 data URI，写入请求体的 field 字段（可重复）
+//   --file <field>=<path>        把本地文件转成 data URI，写入 JSON 请求体的 field 字段（可重复）
+//   --form <field>=<value>       multipart/form-data 字段（可重复）；<field>=@<path> 表示上传文件内容
+//                                --form 不能与 --body、--body-file、--file 同时使用
+//   --output <path>              请求成功时把响应体原样保存到该文件（如下载图片）
 //   --network <name>             只允许在这个网络付款：base、base-sepolia 或 CAIP-2（如 eip155:8453），默认 base
 //
 // 配置（环境变量优先，其次是配置文件 ~/.config/x402-pay/config.json）：
@@ -118,34 +123,72 @@ function hardCap() {
   return { cap, source: source || "默认值" };
 }
 
-function buildRequest(values) {
-  let body;
-  if (values.body && values["body-file"]) fail("--body 和 --body-file 只能二选一");
-  if (values.body) body = JSON.parse(values.body);
-  if (values["body-file"]) body = JSON.parse(fs.readFileSync(values["body-file"], "utf8"));
-
-  for (const spec of values.file || []) {
-    const eq = spec.indexOf("=");
-    if (eq <= 0) fail(`--file 格式应为 <field>=<path>，收到 ${spec}`);
-    const field = spec.slice(0, eq);
-    const file = spec.slice(eq + 1);
-    const mime = MIME_TYPES[path.extname(file).toLowerCase()] || "application/octet-stream";
-    body = body || {};
-    body[field] = `data:${mime};base64,${fs.readFileSync(file).toString("base64")}`;
-  }
-
-  const method = (values.method || (body ? "POST" : "GET")).toUpperCase();
-  const init = { method, headers: {} };
-  if (body !== undefined) {
-    init.headers["content-type"] = "application/json";
-    init.body = JSON.stringify(body);
-  }
-  return init;
+function splitPair(spec, sep, flag, format) {
+  const i = spec.indexOf(sep);
+  if (i <= 0) fail(`${flag} 格式应为 ${format}，收到 ${spec}`);
+  return [spec.slice(0, i).trim(), spec.slice(i + 1).trim()];
 }
 
-// 响应体：JSON 直接解析；文本原样返回；二进制保存到临时文件
-async function readBody(res) {
+function mimeOf(file) {
+  return MIME_TYPES[path.extname(file).toLowerCase()] || "application/octet-stream";
+}
+
+// multipart 表单：--form field=value 为普通字段，--form field=@path 上传文件内容
+function buildForm(specs) {
+  const form = new FormData();
+  for (const spec of specs) {
+    const [field, value] = splitPair(spec, "=", "--form", "<field>=<value> 或 <field>=@<path>");
+    if (value.startsWith("@")) {
+      const file = value.slice(1);
+      if (!fs.existsSync(file)) fail(`--form 指定的文件不存在：${file}`);
+      form.append(field, new Blob([fs.readFileSync(file)], { type: mimeOf(file) }), path.basename(file));
+    } else {
+      form.append(field, value);
+    }
+  }
+  return form;
+}
+
+function buildRequest(values) {
+  const hasJson = values.body || values["body-file"] || values.file?.length;
+  if (values.body && values["body-file"]) fail("--body 和 --body-file 只能二选一");
+  if (values.form?.length && hasJson) fail("--form（multipart）不能和 --body、--body-file、--file 同时使用");
+
+  const headers = {};
+  for (const spec of values.header || []) {
+    const [name, value] = splitPair(spec, ":", "--header", "'Name: value'");
+    headers[name] = value;
+  }
+
+  let body;
+  if (values.form?.length) {
+    body = buildForm(values.form); // Content-Type（含 boundary）由 fetch 自动设置
+  } else if (hasJson) {
+    let json;
+    if (values.body) json = JSON.parse(values.body);
+    if (values["body-file"]) json = JSON.parse(fs.readFileSync(values["body-file"], "utf8"));
+    for (const spec of values.file || []) {
+      const [field, file] = splitPair(spec, "=", "--file", "<field>=<path>");
+      json = json || {};
+      json[field] = `data:${mimeOf(file)};base64,${fs.readFileSync(file).toString("base64")}`;
+    }
+    headers["content-type"] = "application/json";
+    body = JSON.stringify(json);
+  }
+
+  const method = (values.method || (body !== undefined ? "POST" : "GET")).toUpperCase();
+  return body === undefined ? { method, headers } : { method, headers, body };
+}
+
+// 响应体：指定了 --output 且请求成功时原样保存到该文件；否则 JSON 直接解析、文本原样返回、二进制保存到临时文件
+async function readBody(res, output) {
   const type = res.headers.get("content-type") || "";
+  if (output && res.ok) {
+    const bytes = Buffer.from(await res.arrayBuffer());
+    fs.mkdirSync(path.dirname(path.resolve(output)), { recursive: true });
+    fs.writeFileSync(output, bytes);
+    return { saved_to: path.resolve(output), content_type: type, bytes: bytes.length };
+  }
   if (type.includes("json")) {
     const text = await res.text();
     try {
@@ -189,11 +232,14 @@ async function cmdAddress() {
   print({ address: loadAccount().account.address });
 }
 
+// quote 与 request 都只发一次不带付款的请求，永远不会付款：
+//   quote   用于查看收费接口的报价
+//   request 用于调用免费接口（上传、查询、下载等）；如果意外收到 402，会报告报价但不付款
 async function cmdQuote(values) {
   if (!values.url) fail("缺少 --url");
   const res = await fetch(values.url, buildRequest(values));
   if (res.status !== 402) {
-    return print({ status: res.status, payment_required: false, body: await readBody(res) });
+    return print({ status: res.status, ok: res.ok, payment_required: false, body: await readBody(res, values.output) });
   }
   const paymentRequired = readPaymentRequired(res, await res.text());
   if (!paymentRequired) fail("收到 402，但无法解析支付要求");
@@ -202,6 +248,7 @@ async function cmdQuote(values) {
     payment_required: true,
     x402_version: paymentRequired.x402Version,
     options: paymentRequired.accepts.map(describeRequirement),
+    note: "该接口需要付款，本命令不会付款；确认价格后用 pay 命令调用",
   });
 }
 
@@ -255,7 +302,7 @@ async function cmdPay(values) {
     payment: selected ? describeRequirement(selected) : null,
     ...(rejectedReason && { rejected_reason: rejectedReason }),
     settlement,
-    body: await readBody(res),
+    body: await readBody(res, values.output),
   });
   if (!res.ok) process.exit(1);
 }
@@ -270,6 +317,9 @@ async function main() {
       body: { type: "string" },
       "body-file": { type: "string" },
       file: { type: "string", multiple: true },
+      form: { type: "string", multiple: true },
+      header: { type: "string", multiple: true },
+      output: { type: "string" },
       network: { type: "string" },
       "max-amount": { type: "string" },
     },
@@ -281,11 +331,12 @@ async function main() {
     case "address":
       return cmdAddress();
     case "quote":
+    case "request":
       return cmdQuote(values);
     case "pay":
       return cmdPay(values);
     default:
-      fail("用法：pay.mjs config | address | quote --url <url> [...] | pay --url <url> --max-amount <金额> [...]");
+      fail("用法：pay.mjs config | address | quote --url <url> [...] | request --url <url> [...] | pay --url <url> --max-amount <金额> [...]");
   }
 }
 
